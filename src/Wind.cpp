@@ -23,7 +23,14 @@ RE::BSEventNotifyControl wind::Wind::ProcessEvent(const hdt::PreStepEvent* a_eve
 
 	m_currentTime += e.timeStep;
 	m_sky = RE::Sky::GetSingleton();
-	
+
+	// One-time diagnostics (also proves the listener is registered and firing).
+	static bool loggedFirstEvent = false;
+	if (!loggedFirstEvent) {
+		loggedFirstEvent = true;
+		logger::info("Wind PreStep listener active.");
+	}
+
 	if (m_sky && m_sky->mode == RE::Sky::Mode::kFull && m_sky->windSpeed != 0.0f) 
 	{
 		if (e.objects.size() > 0) 
@@ -52,6 +59,15 @@ RE::BSEventNotifyControl wind::Wind::ProcessEvent(const hdt::PreStepEvent* a_eve
 		//We'll lose time resolution if the game runs for several hours (possible!).
 		//To prevent this, reset the clock when the player is indoors.
 		m_currentTime = 0.0f;
+
+		static bool loggedNoWind = false;
+		if (!loggedNoWind) {
+			loggedNoWind = true;
+			const bool outdoor = m_sky && m_sky->mode == RE::Sky::Mode::kFull;
+			const float speed = m_sky ? m_sky->windSpeed : 0.0f;
+			logger::info("Sky currently has no wind (outdoor={}, windSpeed={}). Wind forces idle until you are outdoors in windy weather.",
+				outdoor, speed);
+		}
 	}
 
 	if (m_config->getb(Config::LOG_PERFORMANCE)) 
@@ -84,6 +100,8 @@ RE::BSEventNotifyControl wind::Wind::ProcessEvent(const hdt::PreStepEvent* a_eve
 			logger::info("Mean time (%d updates): %3d � %-3d (%3d - %-3d) microseconds (%3d - %-3d collision objects)", NFRAMES, meant, (int)std::sqrt(var), mint, maxt, mino, maxo);
 		}
 	}
+
+	return RE::BSEventNotifyControl::kContinue;
 }
 
 void wind::Wind::init(const Config& config)

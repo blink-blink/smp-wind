@@ -1,5 +1,6 @@
 #include "Config.h"
 
+constexpr const char* HDR_GENERAL = "General";
 constexpr const char* HDR_WIND = "Wind";
 constexpr const char* HDR_PERFORMANCE = "Performance";
 
@@ -7,18 +8,21 @@ constexpr bool DEFAULTSB[wind::Config::BOOL_COUNT]
 {
 	false,
 	false,
+	true,
 };
 
 constexpr const char* KEYSB[wind::Config::BOOL_COUNT]
 {
 	"bMassIndependent",
 	"bLogPerformance",
+	"bAutoSave",
 };
 
 constexpr const char* HDRSB[wind::Config::BOOL_COUNT]
 {
 	HDR_WIND,
 	HDR_PERFORMANCE,
+	HDR_GENERAL,
 };
 
 constexpr float DEFAULTSF[wind::Config::FLOAT_COUNT]
@@ -88,11 +92,23 @@ wind::Config::Config()
 	}
 }
 
-wind::Config::~Config()
+std::filesystem::path wind::ConfigPath()
 {
-	for (auto item : m_boneFactors) {
-		delete[] item.first;
+	// Resolve the INI against our own DLL location so reads AND WinAPI writes
+	// (WritePrivateProfileString) both hit <game>/Data/SKSE/Plugins/SMP Wind.ini.
+	// (Relative paths would resolve against C:\Windows for the WinAPI calls.)
+	HMODULE module = nullptr;
+	if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+			reinterpret_cast<LPCWSTR>(&wind::ConfigPath), &module) &&
+		module) {
+		wchar_t buf[MAX_PATH]{};
+		if (GetModuleFileNameW(module, buf, MAX_PATH)) {
+			return std::filesystem::path(buf).parent_path() / "SMP Wind.ini";
+		}
 	}
+
+	// Fallback: current working directory (game root when launched normally).
+	return std::filesystem::current_path() / "SKSE" / "Plugins" / "SMP Wind.ini";
 }
 
 bool wind::Config::load(const std::filesystem::path& path)
@@ -101,37 +117,37 @@ bool wind::Config::load(const std::filesystem::path& path)
 		return false;
 	}
 	else {
-		m_path = path;
+		// Normalize to absolute up front so the WinAPI INI calls in set()/save()
+		// target the real file instead of C:\Windows.
+		std::error_code ec;
+		m_path = std::filesystem::absolute(path, ec);
+		if (ec) {
+			m_path = path;
+		}
 
 		if (std::filesystem::exists(path)) {
-			char buf[256];
+			// Read through SimpleINI, not WinAPI: GetPrivateProfileString
+			// caches file contents per process, so after our own SaveFile
+			// writes it would keep returning stale values on Reload
+			// (a fresh game start works only because the cache is empty).
+			m_ini.Reset();
+			m_ini.LoadFile(m_path.string().c_str());
+
 			for (int i = 0; i < BOOL_COUNT; i++) {
-				DWORD res = GetPrivateProfileString(HDRSB[i], KEYSB[i], NULL, buf, sizeof(buf), m_path.string().c_str());
-				if (res == 0) {
-					m_bools[i] = DEFAULTSB[i];
-				}
-				else {
-					int j;
-					if (sscanf(buf, "%d", &j) == 0) {
-						m_bools[i] = DEFAULTSB[i];
-					}
-					else {
-						m_bools[i] = static_cast<bool>(j);
-					}
-				}
+				m_bools[i] = m_ini.GetBoolValue(HDRSB[i], KEYSB[i], DEFAULTSB[i]);
 			}
 
 			for (int i = 0; i < FLOAT_COUNT; i++) {
-				DWORD res = GetPrivateProfileString(HDRSF[i], KEYSF[i], NULL, buf, sizeof(buf), m_path.string().c_str());
-				if (res == 0) {
+				const char* raw = m_ini.GetValue(HDRSF[i], KEYSF[i], nullptr);
+				if (!raw) {
 					m_floats[i] = DEFAULTSF[i];
 				}
 				else {
 					errno = 0;
-					char* end;
-					float result = std::strtof(buf, &end);
-					if (end == &buf[0] || errno == ERANGE) {
-						logger::warn("WARNING: invalid float value %s for %s. Using default.", buf, KEYSF[i]);
+					char* end = nullptr;
+					float result = std::strtof(raw, &end);
+					if (!end || *end != '\0' || errno == ERANGE) {
+						logger::warn("WARNING: invalid float value %s for %s. Using default.", raw, KEYSF[i]);
 						m_floats[i] = DEFAULTSF[i];
 					}
 					else {
@@ -140,57 +156,36 @@ bool wind::Config::load(const std::filesystem::path& path)
 				}
 			}
 			for (int i = 0; i < INT_COUNT; i++) {
-				DWORD res = GetPrivateProfileString(HDRSI[i], KEYSI[i], NULL, buf, sizeof(buf), m_path.string().c_str());
-				if (res == 0) {
+				const char* raw = m_ini.GetValue(HDRSI[i], KEYSI[i], nullptr);
+				if (!raw) {
 					m_ints[i] = DEFAULTSI[i];
 				}
 				else {
 					errno = 0;
-					char* end;
-					int result = std::strtol(buf, &end, 10);
-					if (end == &buf[0] || errno == ERANGE) {
-						logger::warn("WARNING: invalid integer value %s for %s. Using default.", buf, KEYSI[i]);
+					char* end = nullptr;
+					long result = std::strtol(raw, &end, 10);
+					if (!end || *end != '\0' || errno == ERANGE) {
+						logger::warn("WARNING: invalid integer value %s for %s. Using default.", raw, KEYSI[i]);
 						m_ints[i] = DEFAULTSI[i];
 					}
 					else {
-						m_ints[i] = result;
+						m_ints[i] = static_cast<int>(result);
 					}
 				}
 			}
 
-			std::ifstream file(path);
-
-			while (file.getline(buf, 256)) {
-				if (strcmp(buf, "[Bones]") == 0) {
-					break;
+			m_boneFactors.clear();
+			CSimpleIniA::TNamesDepend keys;
+			m_ini.GetAllKeys("Bones", keys);
+			for (const auto& key : keys) {
+				if (!key.pItem) {
+					continue;
 				}
-			}
-
-			while (file.good()) {
-
-				char next = file.peek();
-				if (std::isspace(next) || next == '[' || !file.good()) {
-					break;
-				}
-
-				auto s = new char[64];
-				file.getline(s, 64, '=');
-
-				file.getline(buf, 64);
-
-				if (!m_boneFactors.contains(s)) {
-
-					float f = std::max(std::strtof(buf, nullptr), 0.0f);
-
-					if (f != 1.0) {
-						m_boneFactors[s] = f;
-
-						logger::info("Scaling wind on bone \"%s\" by a factor %g.", s, f);
-					}
-				}
-				else {
-					logger::warn("WARNING: Ignoring duplicate entry for bone \"%s\".", s);
-					delete[] s;
+				const char* raw = m_ini.GetValue("Bones", key.pItem, "1");
+				const float f = std::max(std::strtof(raw, nullptr), 0.0f);
+				if (f != 1.0f) {
+					m_boneFactors[key.pItem] = f;
+					logger::info("Scaling wind on bone \"%s\" by a factor %g.", key.pItem, f);
 				}
 			}
 		}
@@ -209,13 +204,59 @@ bool wind::Config::load(const std::filesystem::path& path)
 	}
 }
 
+bool wind::Config::saveAs(const std::filesystem::path& path)
+{
+	if (path.extension().string() != ".ini") {
+		return false;
+	}
+
+	std::error_code ec;
+	m_path = std::filesystem::absolute(path, ec);
+	if (ec) {
+		m_path = path;
+	}
+	return save();
+}
+
+bool wind::Config::save()
+{
+	if (m_path.empty()) {
+		return false;
+	}
+
+	for (int i = 0; i < BOOL_COUNT; i++) {
+		m_ini.SetBoolValue(HDRSB[i], KEYSB[i], m_bools[i]);
+	}
+	for (int i = 0; i < FLOAT_COUNT; i++) {
+		m_ini.SetDoubleValue(HDRSF[i], KEYSF[i], static_cast<double>(m_floats[i]));
+	}
+	for (int i = 0; i < INT_COUNT; i++) {
+		m_ini.SetLongValue(HDRSI[i], KEYSI[i], static_cast<long>(m_ints[i]));
+	}
+
+	// Rewrite the [Bones] section from the live map (load() only keeps factors != 1.0).
+	// Also drop a literally-"[Bones]" section: the old WinAPI save() passed the
+	// brackets as part of the name, producing a "[[Bones]]" artifact.
+	m_ini.Delete("Bones", nullptr);
+	m_ini.Delete("[Bones]", nullptr);
+	for (const auto& [name, factor] : m_boneFactors) {
+		m_ini.SetDoubleValue("Bones", name.c_str(), static_cast<double>(factor));
+	}
+
+	return m_ini.SaveFile(m_path.string().c_str()) == SI_OK;
+}
+
 void wind::Config::set(int id, bool b)
 {
 	assert(id >= 0 && id < BOOL_COUNT);
 
 	m_bools[id] = b;
 
-	WritePrivateProfileString(HDRSB[id], KEYSB[id], b ? "1" : "0", m_path.string().c_str());
+	// The autosave flag itself always persists; everything else only when autosave is on.
+	if ((id == AUTOSAVE || m_bools[AUTOSAVE]) && !m_path.empty()) {
+		m_ini.SetBoolValue(HDRSB[id], KEYSB[id], b);
+		m_ini.SaveFile(m_path.string().c_str());
+	}
 }
 
 void wind::Config::set(int id, float f)
@@ -224,9 +265,10 @@ void wind::Config::set(int id, float f)
 
 	m_floats[id] = f;
 
-	char buf[16];
-	snprintf(buf, sizeof(buf), "%f", m_floats[id]);
-	WritePrivateProfileString(HDRSF[id], KEYSF[id], buf, m_path.string().c_str());
+	if (m_bools[AUTOSAVE] && !m_path.empty()) {
+		m_ini.SetDoubleValue(HDRSF[id], KEYSF[id], static_cast<double>(f));
+		m_ini.SaveFile(m_path.string().c_str());
+	}
 }
 
 void wind::Config::set(int id, int i)
@@ -235,7 +277,8 @@ void wind::Config::set(int id, int i)
 
 	m_ints[id] = i;
 
-	char buf[16];
-	snprintf(buf, sizeof(buf), "%d", m_ints[id]);
-	WritePrivateProfileString(HDRSI[id], KEYSI[id], buf, m_path.string().c_str());
+	if (m_bools[AUTOSAVE] && !m_path.empty()) {
+		m_ini.SetLongValue(HDRSI[id], KEYSI[id], static_cast<long>(i));
+		m_ini.SaveFile(m_path.string().c_str());
+	}
 }

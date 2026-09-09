@@ -456,6 +456,8 @@ set(SOURCE_FILES
 	"${SOURCE_DIR}/Papyrus.h"
 	"${SOURCE_DIR}/Config.h"
 	"${SOURCE_DIR}/Config.cpp"
+	"${SOURCE_DIR}/UI/SMPWindMenu.h"
+	"${SOURCE_DIR}/UI/SMPWindMenu.cpp"
 	"${SOURCE_DIR}/main.cpp"
 	"${SOURCE_DIR}/PCH.h"
 )
@@ -519,15 +521,46 @@ if("${CMAKE_CXX_COMPILER_ID}" STREQUAL "MSVC")
 	)
 endif()
 
+# The SKSE Menu Framework SDK header (extern/SKSEMenuFramework/include) is vendored.
+# hdtSMP64 builds without UNICODE, so its GetModuleHandle(L"...") resolves to
+# GetModuleHandleA and rejects the wide literal. Patch it to the W variant at
+# configure time, writing the patched copy into the build tree so the vendored
+# file itself is never modified. SMPWindMenu.cpp includes it.
+set(SMF_PATCHED_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated/SKSEMenuFramework")
+set(SMF_HEADER_SRC "${ROOT_DIR}/extern/SKSEMenuFramework/include/SKSEMenuFramework.h")
+set_property(
+	DIRECTORY
+	APPEND
+	PROPERTY CMAKE_CONFIGURE_DEPENDS "${SMF_HEADER_SRC}")
+file(READ "${SMF_HEADER_SRC}" SMF_HEADER)
+string(REPLACE "GetModuleHandle(L\"SKSEMenuFramework\")" "GetModuleHandleW(L\"SKSEMenuFramework\")" SMF_HEADER
+			   "${SMF_HEADER}")
+string(FIND "${SMF_HEADER}" "GetModuleHandleW(L\"SKSEMenuFramework\")" SMF_PATCH_APPLIED)
+if(SMF_PATCH_APPLIED EQUAL -1)
+	message(
+		FATAL_ERROR
+			"SKSEMenuFramework.h: the GetModuleHandle(L\"SKSEMenuFramework\") string this build patches was not found "
+			"(the vendored header changed). Update the string(REPLACE) patch in src/CMakeLists.txt.")
+endif()
+file(WRITE "${SMF_PATCHED_DIR}/SKSEMenuFramework.h" "${SMF_HEADER}")
+
 target_include_directories(
 	"${PROJECT_NAME}"
 	PRIVATE
 		"${CMAKE_CURRENT_BINARY_DIR}/src"
 		"${SOURCE_DIR}"
+		"${SMF_PATCHED_DIR}"
+		${SIMPLEINI_INCLUDE_DIRS}
 		${DETOURS_LIBRARY}
 		${BULLET_INCLUDE_DIRS}
 		${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/src
 )
+
+# The vendored SDK header trips two /W4 warnings of its own (C4099 struct/class
+# tag mismatch on ImGuiTextFilter; C5054 deprecated operator| between distinct
+# ImGui enums). It is included only by SMPWindMenu.cpp, so silence just those
+# two there.
+set_source_files_properties("${SOURCE_DIR}/UI/SMPWindMenu.cpp" PROPERTIES COMPILE_OPTIONS "/wd4099;/wd5054;/utf-8")
 
 set(SKSE_SUPPORT_XBYAK ON)
 
@@ -575,17 +608,26 @@ endmacro()
 find_dependency_path(CommonLibSSE include/REL/Relocation.h)
 
 if(("${CommonLibSSEPath}" STREQUAL "CommonLibSSEPath-NOTFOUND") OR "${CommonLibSSEPath}" STREQUAL "")
-	# fallback to CommonLibSSEPath_NG from environment
-	message(
-		STATUS
-		"Found CommonLibSSE from CommonLibSSEPath_NG environment variable"
-	)
-	add_subdirectory("$ENV{CommonLibSSEPath_NG}" CommonLibSSE EXCLUDE_FROM_ALL)
+	# fallback to CommonLibSSE path from environment:
+	# preferred COMMONLIB_SSE_FOLDER, then CommonLibSSEPath / CommonLibSSEPath_NG
+	if(NOT "$ENV{COMMONLIB_SSE_FOLDER}" STREQUAL "")
+		message(STATUS "Found CommonLibSSE from COMMONLIB_SSE_FOLDER environment variable")
+		add_subdirectory("$ENV{COMMONLIB_SSE_FOLDER}" CommonLibSSE EXCLUDE_FROM_ALL)
+	elseif(NOT "$ENV{CommonLibSSEPath}" STREQUAL "")
+		message(STATUS "Found CommonLibSSE from CommonLibSSEPath environment variable")
+		add_subdirectory("$ENV{CommonLibSSEPath}" CommonLibSSE EXCLUDE_FROM_ALL)
+	else()
+		message(STATUS "Found CommonLibSSE from CommonLibSSEPath_NG environment variable")
+		add_subdirectory("$ENV{CommonLibSSEPath_NG}" CommonLibSSE EXCLUDE_FROM_ALL)
+	endif()
 endif()
 
 find_package(Bullet CONFIG REQUIRED)
 find_package(spdlog CONFIG REQUIRED)
 find_package(xbyak REQUIRED CONFIG)
+# simpleini is header-only with no CMake config; the vcpkg port instructs
+# consumers to locate the header via find_path.
+find_path(SIMPLEINI_INCLUDE_DIRS "SimpleIni.h" REQUIRED)
 
 target_link_libraries(
 	"${PROJECT_NAME}"

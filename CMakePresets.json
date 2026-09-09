@@ -69,6 +69,22 @@
         "value": "x64"
       },
       "cacheVariables": {
+        "CMAKE_CXX_FLAGS": "/EHsc /MP /W4 /WX"
+      },
+      "generator": "Visual Studio 18 2026",
+      "inherits": [
+        "cmake-dev",
+        "vcpkg",
+        "windows"
+      ],
+      "name": "vs2026-windows-nocuda"
+    },
+    {
+      "architecture": {
+        "strategy": "set",
+        "value": "x64"
+      },
+      "cacheVariables": {
         "CMAKE_CXX_FLAGS": "/EHsc /MP /W4 /WX /arch:AVX"
       },
       "generator": "Visual Studio 17 2022",

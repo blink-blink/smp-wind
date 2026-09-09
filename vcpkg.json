@@ -1,6 +1,7 @@
 {
   "name": "smpwind",
   "version": "1",
+  "builtin-baseline": "60b06921c7c7ac787b23a222dfab5cdd3911712e",
   "dependencies": 
   [
     "directxtk",
@@ -10,6 +11,7 @@
     "spdlog",
     "bullet3",
     "hdtsmp64",
+    "simpleini",
     "xbyak"
   ]
 }

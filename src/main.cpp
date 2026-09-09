@@ -2,6 +2,7 @@
 #include "Config.h"
 #include "Wind.h"
 #include "Papyrus.h"
+#include "UI/SMPWindMenu.h"
 
 constexpr unsigned long VERSION_MAJOR{ 2 };
 constexpr unsigned long VERSION_MINOR{ 3 };
@@ -60,6 +61,10 @@ void SMP_MessageHandler(SKSE::MessagingInterface::Message* a_msg)
 		auto* smp = static_cast<hdt::PluginInterface*>(a_msg->data);
 		const auto& info = smp->getVersionInfo();
 
+		logger::info("Received hdtSMP64 startup message: interface v{}.{}.{}, Bullet v{}.{}.{}",
+			info.interfaceVersion.major, info.interfaceVersion.minor, info.interfaceVersion.patch,
+			info.bulletVersion.major, info.bulletVersion.minor, info.bulletVersion.patch);
+
 		//
 		if (info.interfaceVersion >= interfaceMin && info.interfaceVersion < interfaceMax) 
 		{
@@ -67,20 +72,41 @@ void SMP_MessageHandler(SKSE::MessagingInterface::Message* a_msg)
 			{
 				logger::info(".\n");
 
+				// Absolute path next to our DLL (Data/SKSE/Plugins/SMP Wind.ini).
+				// The legacy relative path resolved against the game root, so pick
+				// it up once if the new location doesn't exist yet.
+				const auto iniPath = wind::ConfigPath();
+				const std::filesystem::path legacyPath("SKSE\\Plugins\\SMP Wind.ini");
+				std::error_code ec;
+				const bool isNew = !std::filesystem::exists(iniPath, ec);
+				const std::filesystem::path loadPath =
+					(isNew && std::filesystem::exists(legacyPath, ec)) ? legacyPath : iniPath;
+
 				//
 				logger::info("Loading settings...");
-				if (wind::g_config.load("SKSE\\Plugins\\SMP Wind.ini")) 
+				if (wind::g_config.load(loadPath))
 				{
 					logger::info("Settings loaded.\n");
-				} 
-				else 
+				}
+				else
 				{
 					logger::warn("WARNING: Failed to load config file. Settings will not be saved.\n");
+				}
+
+				if (isNew) {
+					if (loadPath == iniPath) {
+						// First run: generate the INI with current values.
+						wind::g_config.save();
+					}
+					else {
+						// Migrated from the legacy location: keep the values, move the file.
+						wind::g_config.saveAs(iniPath);
+					}
 				}
 		
 				wind::g_wind.init(wind::g_config);
 				smp->addListener(&wind::g_wind);
-				logger::info("Initialisation complete.\n");
+				logger::info("Initialisation complete. Wind listener registered.\n");
 			} 
 			else 
 			{
@@ -98,11 +124,8 @@ void SKSE_MessageHandler(SKSE::MessagingInterface::Message* a_msg)
 {
 	if (a_msg && a_msg->type == SKSE::MessagingInterface::kPostPostLoad)
 	{
-		const auto messaging = SKSE::GetMessagingInterface();
-		if (messaging)
-		{
-			messaging->RegisterListener("hdtSMP64", SMP_MessageHandler);
-		}
+		// Register our config pages with the SKSE Menu Framework, if installed. No-ops otherwise.
+		wind::SMPWindMenu::Register();
 	}
 }
 
@@ -128,7 +151,7 @@ extern "C" DLLEXPORT constinit auto SKSEPlugin_Version = []()
 	v.PluginVersion(Plugin::VERSION);
 	v.PluginName(Plugin::NAME);
 	v.UsesAddressLibrary();
-	v.CompatibleVersions({ SKSE::RUNTIME_SSE_LATEST });
+	v.CompatibleVersions({ SKSE::RUNTIME_SSE_LATEST_SE, SKSE::RUNTIME_SSE_LATEST, SKSE::RUNTIME_1_6_1179, SKSE::RUNTIME_LATEST_VR });
 	v.UsesNoStructs();
 
 	return v;
@@ -145,6 +168,15 @@ extern "C" DLLEXPORT bool SKSEAPI SKSEPlugin_Load(const SKSE::LoadInterface* a_s
 	if (!messaging->RegisterListener("SKSE", SKSE_MessageHandler)) 
 	{
 		return false;
+	}
+
+	// Subscribe to hdtSMP64 startup messages here at load time, NOT in the
+	// kPostPostLoad handler: FSMP dispatches MSG_STARTUP during kPostPostLoad,
+	// and hdtSMP64.dll sorts before smpwind.dll, so registering there races
+	// (and loses) against FSMP's broadcast.
+	if (!messaging->RegisterListener("hdtSMP64", SMP_MessageHandler))
+	{
+		logger::warn("WARNING: Failed to register hdtSMP64 listener. Wind will not work.\n");
 	}
 
 	const auto papyrus = SKSE::GetPapyrusInterface();

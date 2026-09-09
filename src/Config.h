@@ -1,7 +1,12 @@
 #pragma once
 
+#include <SimpleIni.h>
+
 namespace wind
 {
+	// Absolute path of the INI next to our DLL: <game>/Data/SKSE/Plugins/SMP Wind.ini
+	std::filesystem::path ConfigPath();
+
 	class Config
 	{
 	public:
@@ -9,6 +14,7 @@ namespace wind
 		{
 			MASS_INDEPENDENT,
 			LOG_PERFORMANCE,
+			AUTOSAVE,
 			BOOL_COUNT
 		};
 
@@ -34,9 +40,12 @@ namespace wind
 
 	public:
 		Config();
-		~Config();
+		~Config() = default;
 
 		bool  load(const std::filesystem::path& path);
+		bool  save();
+		bool  saveAs(const std::filesystem::path& path);
+		const std::filesystem::path& path() const { return m_path; }
 		bool  getb(int id) const { assert(id >= 0 && id < BOOL_COUNT); return m_bools[id]; }
 		void  set(int id, bool b);
 		float getf(int id) const { assert(id >= 0 && id < FLOAT_COUNT); return m_floats[id]; }
@@ -48,14 +57,23 @@ namespace wind
 		
 		float getBoneFactor(const char* name) const
 		{
-			if (auto it = m_boneFactors.find(name); it != m_boneFactors.end()) {
+			if (auto it = m_boneFactors.find(std::string(name)); it != m_boneFactors.end()) {
 				return it->second;
 			}
 			else {
 				return 1.0;
 			}
 		}
-		void setBoneFactor(const char* name, float f) { m_boneFactors[name] = f; }
+		void setBoneFactor(const char* name, float f)
+		{
+			m_boneFactors[std::string(name)] = f;
+			if (!m_path.empty()) {
+				m_ini.SetDoubleValue("Bones", name, static_cast<double>(f));
+				if (m_bools[AUTOSAVE]) {
+					m_ini.SaveFile(m_path.string().c_str());
+				}
+			}
+		}
 
 	private:
 		std::filesystem::path m_path;
@@ -63,14 +81,10 @@ namespace wind
 		int                   m_ints[INT_COUNT];
 		bool                  m_bools[BOOL_COUNT];
 
-		struct StringCompare
-		{
-			bool operator() (const char* lhs, const char* rhs) const 
-			{
-				return std::strcmp(lhs, rhs) < 0;
-			}
-		};
+		// Live INI document (SimpleINI). load() parses the file into it, set()
+		// updates it and saves, so the file on disk always mirrors the arrays.
+		CSimpleIniA m_ini;
 
-		std::map<const char*, float, StringCompare> m_boneFactors;
+		std::map<std::string, float> m_boneFactors;
 	};
 }
